@@ -1,96 +1,66 @@
 import streamlit as st
-import pandas as pd
-import random
-import io
 import requests
 from bs4 import BeautifulSoup
 import re
 
-st.set_page_config(page_title="全球图书智能推荐系统 V7.0", layout="wide")
-st.title("📚 智慧馆藏推荐系统 (历史数据参考版)")
+# --- 增强型尼尔森抓取引擎 ---
+def get_nielsen_details_v2(isbn, username, password):
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.nielsenbookdataonline.com/bdol/index.jsp"
+    }
 
-# --- 尼尔森/数据抓取逻辑 (保持之前的稳定版本) ---
-def get_nielsen_details(isbn, username, password):
-    # (此处省略之前已实现的抓取代码，保持逻辑一致...)
-    return None
-
-# --- 核心：历史数据分析引擎 ---
-def analyze_history(new_row, history_df):
-    if history_df is None or history_df.empty:
-        return ""
-    
-    # 获取当前书的信息
-    current_pub = str(new_row.get('出版社', ''))
-    current_author = str(new_row.get('著者', ''))
-    
-    # 逻辑1：检查出版社重合度
-    pub_match = history_df[history_df['出版社'].str.contains(current_pub, na=False, case=False)] if current_pub else []
-    # 逻辑2：检查作者重合度
-    author_match = history_df[history_df['著者'].str.contains(current_author, na=False, case=False)] if current_author else []
-    
-    insights = []
-    if len(pub_match) > 5:
-        insights.append(f"该馆历史已采选该出版社图书 {len(pub_match)} 种，馆藏匹配度极高")
-    if len(author_match) > 0:
-        insights.append(f"该馆曾采购过此作者的相关作品，建议保持系列连贯性")
+    try:
+        # 第一步：访问首页获取初始 Cookies 和 Token
+        landing = session.get("https://www.nielsenbookdataonline.com/bdol/index.jsp", headers=headers)
         
-    return " | ".join(insights) if insights else "该书为馆藏新领域补充"
+        # 第二步：登录
+        login_url = "https://www.nielsenbookdataonline.com/bdol/auth/login.do"
+        login_data = {'username': username, 'password': password}
+        session.post(login_url, data=login_data, headers=headers)
 
-# --- 综合推荐生成逻辑 ---
-def generate_advanced_reason(row, history_df, audience, style, n_user, n_pass):
-    local_intro = str(row.get('内容简介', '')).strip()
-    if local_intro == 'nan': local_intro = ""
-    
-    # 1. 获取历史参考信息
-    history_insight = analyze_history(row, history_df)
-    
-    # 2. 模拟风格化逻辑
-    style_msg = {
-        "学术": "学术前沿性强，符合高校馆藏标准。",
-        "大众": "内容受众广，建议作为阅览室重点推荐。",
-        "大学生": "适合作为参考教材，提升学生科研素养。"
-    }.get(style, "优质选书建议。")
+        # 第三步：先访问快速查找页面，抓取动态 TOKEN
+        search_page = session.get("https://www.nielsenbookdataonline.com/bdol/auth/booksearchadvanced.do", headers=headers)
+        token_match = re.search(r'name="org\.apache\.struts\.taglib\.html\.TOKEN" value="([^"]+)"', search_page.text)
+        token = token_match.group(1) if token_match else ""
 
-    final_reason = f"【历史参考】：{history_insight}\n\n【内容简介】：{local_intro[:100]}...\n\n【{audience}建议】：{style_msg}"
-    return final_reason
-
-# --- 用户界面 ---
-with st.sidebar:
-    st.header("📂 数据上传中心")
-    new_books_file = st.file_uploader("1. 上传本期待选新书 (需含'内容简介')", type=["xlsx"])
-    history_file = st.file_uploader("2. 上传历史采买数据 (参考库)", type=["xlsx"])
-    
-    st.divider()
-    st.header("🔐 接口授权")
-    n_user = st.text_input("Nielsen Username")
-    n_pass = st.text_input("Nielsen Password", type="password")
-    
-    num_rec = st.number_input("推荐数量", 1, 50, 3)
-    style_preference = st.selectbox("推荐风格", ["学术", "大众", "大学生"])
-
-# 加载历史数据
-history_data = None
-if history_file:
-    history_data = pd.read_excel(history_file)
-    st.sidebar.success(f"已加载 {len(history_data)} 条历史记录")
-
-if new_books_file:
-    df_new = pd.read_excel(new_books_file)
-    if st.button("🏁 开始智能查重与推荐"):
-        selected_df = df_new.sample(n=min(len(df_new), int(num_rec))).copy()
-        reasons = []
+        # 第四步：携带 TOKEN 发起 ISBN 搜索
+        # 处理 ISBN，确保没有空格和连字符
+        clean_isbn = re.sub(r'[^0-9X]', '', str(isbn))
+        find_url = "https://www.nielsenbookdataonline.com/bdol/auth/quickfind.do"
+        search_payload = {
+            "org.apache.struts.taglib.html.TOKEN": token,
+            "quicksearch": clean_isbn
+        }
         
-        for idx, row in selected_df.iterrows():
-            st.write(f"正在分析历史关联: 《{row['书名']}》")
-            reasons.append(generate_advanced_reason(row, history_data, "图书馆", style_preference, n_user, n_pass))
+        res = session.post(find_url, data=search_payload, headers=headers)
         
-        selected_df['智能综合推荐理由'] = reasons
-        
-        # 结果展示
-        st.subheader("📋 最终推荐方案")
-        st.dataframe(selected_df[['ISBN', '书名', '智能综合推荐理由']], use_container_width=True)
-        
-        # 导出
-        output = io.BytesIO()
-        selected_df.to_excel(output, index=False)
-        st.download_button("📥 点击下载正式采选报告", output.getvalue(), "智慧采选方案.xlsx")
+        # 第五步：解析复杂的嵌套表格
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            # 尼尔森的简介通常在 class="details1" 或 "main_text" 的后续表格中
+            # 方案：直接查找包含 Description 的加粗文本
+            for b_tag in soup.find_all(['strong', 'b', 'th']):
+                if "Description" in b_tag.get_text():
+                    # 简介通常在同一个单元格或下一个单元格
+                    parent_td = b_tag.find_parent('td')
+                    if parent_td:
+                        full_text = parent_td.get_text(separator=" ", strip=True)
+                        # 截取 Description 之后的内容
+                        content = full_text.split("Description")[-1].strip()
+                        if len(content) > 20: return content
+            
+            # 保底方案：抓取整个 main_text 区域并清洗
+            main_div = soup.find(id="body_main") or soup.find(class_="main_text")
+            if main_div:
+                text = main_div.get_text(strip=True)
+                # 排除 ISBN 和出版日期等杂讯
+                if "Hardback" in text:
+                    text = text.split("Hardback")[-1]
+                return text[:500] # 返回前500字
+
+    except Exception as e:
+        return f"抓取异常: {str(e)}"
+    return "未在尼尔森找到简介"
