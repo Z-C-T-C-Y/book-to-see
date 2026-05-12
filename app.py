@@ -3,104 +3,102 @@ import pandas as pd
 import random
 import io
 import requests
-from bs4 import BeautifulSoup # 用于解析网页内容
+from bs4 import BeautifulSoup
+import re
 
-st.set_page_config(page_title="全球原版书智能推荐系统", layout="wide")
-st.title("🌐 全球原版书深度推荐系统 (英/日文加强版)")
+st.set_page_config(page_title="全球图书智能推荐系统 V6.0", layout="wide")
+st.title("📚 全球图书推荐系统 (本地简介 + 网上数据综合版)")
 
-def get_foreign_book_info(isbn):
-    """
-    根据ISBN自动判断语种并从对应国家站点抓取信息
-    """
-    isbn = str(isbn).replace('-', '').strip()
-    
-    # 简单的语种判断逻辑：4开头通常为日本，0/1开头为英美
-    is_japanese = isbn.startswith('9784') or isbn.startswith('4')
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-
-    if is_japanese:
-        # 尝试访问日本图书检索接口或公开页面 (此处以常用开放接口为例)
-        url = f"https://api.openbd.jp/v1/get?isbn={isbn}"
-        try:
-            res = requests.get(url, headers=headers, timeout=8)
-            data = res.json()
-            if data and data[0]:
-                summary = data[0]['summary'].get('description', '')
-                author_bio = data[0]['onix'].get('CollateralDetail', {}).get('TextContent', [{}])[0].get('Text', '')
-                return f"【日文原版解析】: {summary[:100]}... (作者介绍: {author_bio[:50]})"
-        except:
-            return None
-    else:
-        # 英文书处理逻辑
-        url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
-        try:
-            res = requests.get(url, headers=headers, timeout=8)
-            data = res.json()
-            if "items" in data:
-                desc = data["items"][0]["volumeInfo"].get("description", "")
-                return f"【英文原版解析】: {desc[:100]}..."
-        except:
-            return None
+# --- 尼尔森深度解析引擎 ---
+def get_nielsen_details(isbn, username, password):
+    login_url = "https://www.nielsenbookdataonline.com/bdol/auth/login.do"
+    search_url = "https://www.nielsenbookdataonline.com/bdol/auth/quickfind.do"
+    session = requests.Session()
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        session.post(login_url, data={'username': username, 'password': password}, headers=headers, timeout=10)
+        res = session.post(search_url, data={'quicksearch': isbn}, headers=headers, timeout=10)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            # 查找 Description 或 Review
+            for tag in soup.find_all(['p', 'td', 'span']):
+                if re.search(r'(Description|Review):', tag.get_text(), re.I):
+                    return tag.get_text(strip=True).split(':', 1)[-1]
+    except:
+        return None
     return None
 
-def generate_custom_reason(row, audience, style):
-    # 联网获取“看一眼”的深度内容
-    online_info = get_foreign_book_info(row['ISBN'])
-    
-    # 风格化文案模板
-    templates = {
-        "学术": "该著作在国际学术界具有独到视角，其论证严密，是相关研究领域不可多得的参考文献。",
-        "大众": "本书叙述生动，即便是不具备专业背景的读者也能从中获得启发，阅读体验极佳。",
-        "大学生": "推荐给希望拓展国际视野的同学们，书中的案例和理论对毕业论文或课程设计极具参考价值。",
-        "低龄儿童": "图文并茂（或构思精巧），是培养外语语感和跨文化思维的优质启蒙读物。"
-    }
+# --- 日文书数据引擎 ---
+def get_japanese_data(isbn):
+    url = f"https://api.openbd.jp/v1/get?isbn={isbn}"
+    try:
+        res = requests.get(url, timeout=8)
+        data = res.json()
+        if data and data[0]:
+            return data[0].get('summary', {}).get('description', "")
+    except:
+        return None
 
-    base = templates.get(style, "优秀的海外原版读物。")
+# --- 综合推荐生成逻辑 ---
+def generate_combined_reason(row, audience, style, n_user, n_pass):
+    isbn = str(row['ISBN']).replace('-', '').strip()
+    local_intro = str(row.get('内容简介', '')).strip()
+    if local_intro == 'nan': local_intro = ""
     
-    if online_info:
-        return f"{online_info} \n\n【推荐建议】：{base}"
-    else:
-        return f"《{row['书名']}》由{row['出版社']}原版引进，著者{row['著者']}在海外享有盛誉。{base}"
+    online_info = None
+    # 联网获取补充信息
+    if isbn.startswith('9784') or isbn.startswith('4'):
+        online_info = get_japanese_data(isbn)
+    elif n_user and n_pass:
+        online_info = get_nielsen_details(isbn, n_user, n_pass)
+    
+    # 综合内容源
+    combined_content = local_intro
+    if online_info and online_info not in local_intro:
+        combined_content += " | 补充信息: " + online_info[:150]
+    
+    # 风格化润色
+    style_suffix = {
+        "学术": "该书论证严密，具有极高的学术价值，建议专业人士研读。",
+        "大众": "本书深入浅出，是本年度非常值得推荐的‘种草’好书。",
+        "大学生": "推荐给学生群体，对专业学习和视野拓展大有裨益。",
+        "低龄儿童": "图文精彩，适合亲子阅读及启蒙教育。"
+    }.get(style, "值得关注。")
 
-# --- 侧边栏 ---
+    final_reason = f"【内容综合】{combined_content if combined_content else '根据书名及作者信息分析'}。\n\n【{audience}推荐】：{style_suffix}"
+    return final_reason
+
+# --- 界面展示 ---
 with st.sidebar:
-    st.header("⚙️ 跨境推荐配置")
-    uploaded_file = st.file_uploader("上传 Excel 目录 (含英文/日文书)", type=["xlsx"])
-    num_rec = st.number_input("推荐数量", min_value=1, max_value=20, value=3)
+    st.header("🔐 尼尔森授权")
+    n_user = st.text_input("Username")
+    n_pass = st.text_input("Password", type="password")
+    st.divider()
+    uploaded_file = st.file_uploader("上传 Excel (需含'内容简介'列)", type=["xlsx"])
+    num_rec = st.number_input("推荐数量", 1, 50, 3)
     target_audience = st.selectbox("目标受众", ["图书馆", "普通大众"])
     style_preference = st.selectbox("推荐风格", ["学术", "大众", "大学生", "低龄儿童"])
-    st.caption("提示：推荐日文书时，系统会自动调用日本图书数据库接口。")
 
-# --- 主程序 ---
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-    df.columns = df.columns.str.strip()
+    df.columns = df.columns.str.strip() # 清理空格
     
-    if 'ISBN' in df.columns:
-        if st.button("🔍 开始跨国联网分析"):
-            actual_num = min(len(df), int(num_rec))
-            selected_df = df.sample(n=actual_num).copy()
-            
-            progress_bar = st.progress(0)
+    if st.button("🚀 生成综合推荐报表"):
+        if '内容简介' not in df.columns:
+            st.error("表格中缺少‘内容简介’列，请检查！")
+        else:
+            selected_df = df.sample(n=min(len(df), int(num_rec))).copy()
             reasons = []
-            
+            bar = st.progress(0)
             for i, (idx, row) in enumerate(selected_df.iterrows()):
-                st.write(f"正在跨境检索: 《{row['书名']}》...")
-                reasons.append(generate_custom_reason(row, target_audience, style_preference))
-                progress_bar.progress((i + 1) / actual_num)
+                st.write(f"正在综合分析: 《{row['书名']}》")
+                reasons.append(generate_combined_reason(row, target_audience, style_preference, n_user, n_pass))
+                bar.progress((i + 1) / len(selected_df))
             
-            selected_df['推荐理由'] = reasons
-            st.success("✨ 分析完成！")
+            selected_df['智能综合推荐理由'] = reasons
+            st.success("报表已生成！")
+            st.dataframe(selected_df[['ISBN', '书名', '内容简介', '智能综合推荐理由']], use_container_width=True)
             
-            st.table(selected_df[['书名', '著者', '出版社', '推荐理由']])
-            
-            # 导出
             output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                selected_df.to_excel(writer, index=False)
-            st.download_button("📥 下载带深度理由的清单", output.getvalue(), "海外书深度推荐.xlsx")
-    else:
-        st.error("表格必须包含 ISBN 列！")
+            selected_df.to_excel(output, index=False)
+            st.download_button("📥 下载 Excel 结果", output.getvalue(), "综合推荐表.xlsx")
